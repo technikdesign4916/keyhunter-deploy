@@ -16,6 +16,7 @@ WORKDIR /app
 COPY --from=build /app/target/release/keyhunter-rs /usr/local/bin/keyhunter-rs
 COPY settings.json /app/settings.json
 COPY entrypoint.sh /entrypoint.sh
+COPY seed.py /app/seed.py
 RUN chmod +x /entrypoint.sh && mkdir -p /app/data
 ENV DB_PATH=/app/data/scanner.db \
     PROXY_OWNED=/app/data/owned_proxies.txt \
