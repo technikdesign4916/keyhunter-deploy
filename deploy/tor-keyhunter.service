@@ -1,0 +1,12 @@
+[Unit]
+Description=Tor SOCKS5 for keyhunter dark-web sources
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/tor --SocksPort 127.0.0.1:9051 --DataDirectory /home/hermes/.tor-keyhunter
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

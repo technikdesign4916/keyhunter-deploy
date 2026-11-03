@@ -1,0 +1,18 @@
+[Unit]
+Description=keyhunter-rs — GitHub key scanner + Telegram admin bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/hermes/keyhunter-rs
+EnvironmentFile=/home/hermes/keyhunter-rs/.env
+ExecStart=/home/hermes/keyhunter-rs/target/release/keyhunter-rs
+Restart=always
+RestartSec=5
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

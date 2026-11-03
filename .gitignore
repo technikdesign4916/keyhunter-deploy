@@ -1,0 +1,8 @@
+.env
+target/
+data/
+exports/
+*.bak-*
+.git/
+kh_rs.tar.gz
+*.log
