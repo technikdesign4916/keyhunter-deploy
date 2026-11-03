@@ -27,7 +27,10 @@ def main() -> int:
         except Exception:
             continue
         try:
-            for k, v in (("auto_cards", auto_cards), ("auto", "1"), ("auto_batch", auto_batch)):
+            for k, v in (("auto_cards", auto_cards), ("auto", "1"),
+                         ("auto_batch", auto_batch),
+                         ("notify_limit", os.environ.get("NOTIFY_LIMIT", "0")),
+                         ("checker_models", os.environ.get("CHECKER_MODELS", "10"))):
                 con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (k, v))
             offered = 0
             if pats_b64:
