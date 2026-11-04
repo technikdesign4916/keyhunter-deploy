@@ -17,5 +17,10 @@ python3 -m http.server "$PORT" --bind 0.0.0.0 >/dev/null 2>&1 &
 echo "[entry] seeding settings + PAT pool in background"
 python3 /app/seed.py &
 
+if [ -n "$KH_INGEST_URL" ]; then
+  echo "[entry] shipping findings to $KH_INGEST_URL"
+  python3 /app/ship.py &
+fi
+
 echo "[entry] starting keyhunter-rs (NO_POLL=${NO_POLL:-1}, auto=${AUTO:-1})"
 exec keyhunter-rs
