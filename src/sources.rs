@@ -26,6 +26,9 @@ pub struct SourceDoc {
 /// Flattened rotation: every task is (source, query). The auto loop walks it
 /// round-robin so one source cannot starve the others.
 pub const TASKS: &[(&str, &str)] = &[
+    // Telegram key-card channels: highest-value live lane (python tgweb farm).
+    ("tgweb", ""),
+    ("tgweb", "mikakeyye"),
     ("torch", "api key"),
     ("torch", "pastebin"),
     ("torch", "openai"),
@@ -427,6 +430,9 @@ pub fn provider_tasks() -> Vec<(&'static str, &'static str)> {
 /// head start over the old zero-priority backlog.
 pub fn task_priority(source: &str) -> i64 {
     match source {
+        // Live key cards from Telegram: die within hours, so scan first.
+        "tgweb" => 950,
+        "telegram" => 900,
         "wechat" => 285,
         "juejin" => 280,
         "csdn" => 275,
@@ -912,7 +918,7 @@ impl Sources {
             | "thehackernews" | "bleepingcomputer" | "securityweek" | "infoq" | "jianshu"
             | "weibo" | "bilibili" | "hackread" | "cybernews" | "theregister" | "packetstorm"
             | "wechat" | "hashnode2" => self.html_source(source, query, limit).await,
-            "telegram" => self.telegram(query, limit).await,
+            "tgweb" | "telegram" => self.tgweb(query, limit).await,
             other => bail!("unknown source: {other}"),
         }
     }
@@ -2042,27 +2048,78 @@ impl Sources {
         Ok(self.fetch_raw_docs("gitlab_snippet", items, limit, 6).await)
     }
 
-    // ---------- Telegram public channels ----------
-
-    async fn telegram(&self, channel: &str, limit: usize) -> Result<Vec<SourceDoc>> {
-        let channel = channel.trim().trim_start_matches('@');
-        if channel.is_empty() {
+    // ---------- Telegram public channels (t.me/s previews) ----------
+    //
+    // Mirrors the python tgweb farm: /s/<channel> renders the last posts
+    // server-side, so a plain GET returns readable text with no account, no
+    // MTProto session and no getUpdates polling conflict with the main bot.
+    // Key dumps are posted as "Чек API — <provider>" cards several times a day
+    // and stay alive for only a few hours, so this lane runs top priority and
+    // walks several preview pages back per channel.
+    async fn tgweb(&self, query: &str, limit: usize) -> Result<Vec<SourceDoc>> {
+        let channels = tg_channels(query);
+        if channels.is_empty() {
             return Ok(Vec::new());
         }
-        let url = format!("https://t.me/s/{}", urlencoding::encode(channel));
-        let html = self.text(&url).await?;
-        let text = strip_html(&html);
-        if text.trim().len() < 80 {
-            return Ok(Vec::new());
+        let per = limit.max(8);
+        let mut docs = Vec::new();
+        for channel in channels.into_iter().take(per) {
+            let mut before: Option<String> = None;
+            let mut posts = 0usize;
+            for _ in 0..3 {
+                let url = match &before {
+                    Some(b) => format!("https://t.me/s/{}?before={}", channel, b),
+                    None => format!("https://t.me/s/{}", channel),
+                };
+                let html = match self.text(&url).await {
+                    Ok(h) => h,
+                    Err(e) => {
+                        debug!("tgweb {channel}: {e}");
+                        break;
+                    }
+                };
+                // Split the preview into individual posts: a key card is one
+                // post, and pairing a key with the endpoint from a different
+                // post invents pairs that never existed.
+                for (post_id, chunk) in tg_posts(&html) {
+                    let text = strip_html(chunk);
+                    if text.trim().len() < 40 {
+                        continue;
+                    }
+                    let lm = text.to_ascii_lowercase();
+                    let interesting = lm.contains("sk-")
+                        || lm.contains("nvapi-")
+                        || lm.contains("api key")
+                        || lm.contains("api_key")
+                        || lm.contains("base url")
+                        || lm.contains("алибан")
+                        || lm.contains("dashscope")
+                        || lm.contains("aliyuncs")
+                        || lm.contains("openrouter")
+                        || lm.contains("anthropic");
+                    if !interesting {
+                        continue;
+                    }
+                    posts += 1;
+                    docs.push(SourceDoc {
+                        source: "tgweb".into(),
+                        repo: format!("tgweb:@{channel}"),
+                        path: format!("{channel}#{post_id}"),
+                        text: cap(text),
+                        url: format!("https://t.me/{channel}/{}", post_id.rsplit('/').next().unwrap_or("")),
+                    });
+                    if docs.len() >= 240 {
+                        return Ok(docs);
+                    }
+                }
+                let next = tg_before(&html);
+                if next.is_none() || next == before || posts == 0 {
+                    break;
+                }
+                before = next;
+            }
         }
-        let _ = limit;
-        Ok(vec![SourceDoc {
-            source: "telegram".into(),
-            repo: format!("telegram:@{channel}"),
-            path: channel.to_string(),
-            text: cap(text),
-            url,
-        }])
+        Ok(docs)
     }
 
     // ---------- Torch: Tor hidden-service search ----------
@@ -3379,6 +3436,90 @@ fn proxy_index_for_host(host: &str, len: usize) -> usize {
     let mut hasher = DefaultHasher::new();
     host.hash(&mut hasher);
     (hasher.finish() % len as u64) as usize
+}
+
+/// Channels that post live API-key cards in public previews. Kept small and
+/// verified: a channel that stops posting only costs one cheap GET per cycle.
+const TG_CHANNEL_PACK: &[&str] = &["mikakeyye"];
+
+/// Channel list for the Telegram lane.
+///
+/// An explicit task query wins (comma/space separated, `@` and `t.me/` prefixes
+/// tolerated). An empty query or `*` means "the whole operator pack": the file
+/// named by `TG_CHANNELS_FILE` (default `data/tg_channels.txt`), falling back to
+/// the built-in list. The file is re-read on every call, so adding a channel
+/// never requires a rebuild.
+fn tg_channels(query: &str) -> Vec<String> {
+    let explicit = query.trim();
+    let mut raw = String::new();
+    if !explicit.is_empty() && explicit != "*" {
+        raw.push_str(explicit);
+    } else {
+        let path =
+            std::env::var("TG_CHANNELS_FILE").unwrap_or_else(|_| "data/tg_channels.txt".to_string());
+        if let Ok(body) = std::fs::read_to_string(&path) {
+            for line in body.lines() {
+                let line = line.split('#').next().unwrap_or("").trim();
+                if !line.is_empty() {
+                    raw.push_str(line);
+                    raw.push(' ');
+                }
+            }
+        }
+        if raw.trim().is_empty() {
+            raw.push_str(&TG_CHANNEL_PACK.join(" "));
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    for part in raw.split(|c: char| c == ',' || c.is_whitespace()) {
+        let name = part
+            .trim()
+            .trim_start_matches("https://t.me/")
+            .trim_start_matches("t.me/")
+            .trim_start_matches('@');
+        if name.len() < 4 || name.len() > 64 {
+            continue;
+        }
+        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            continue;
+        }
+        if !out.iter().any(|x| x == name) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
+/// Split a `t.me/s` preview page into individual posts.
+///
+/// Every post is a `<div class="tgme_widget_message …" data-post="chan/123">`
+/// block. Slicing on the data-post anchor keeps a key and its endpoint in the
+/// same document, which is exactly what the pair extractor needs — a whole-page
+/// blob pairs a fresh key with an endpoint from an unrelated post.
+fn tg_posts(html: &str) -> Vec<(String, &str)> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r#"data-post="([A-Za-z0-9_]+/[0-9]+)""#).unwrap());
+    let marks: Vec<(usize, String)> = re
+        .captures_iter(html)
+        .filter_map(|c| Some((c.get(0)?.start(), c.get(1)?.as_str().to_string())))
+        .collect();
+    let mut out = Vec::new();
+    for (i, (start, id)) in marks.iter().enumerate() {
+        let end = marks.get(i + 1).map(|(s, _)| *s).unwrap_or(html.len());
+        if end > *start {
+            out.push((id.clone(), &html[*start..end]));
+        }
+    }
+    out
+}
+
+/// "Load older posts" anchor on a t.me/s preview page: `/s/<chan>?before=<id>`.
+fn tg_before(html: &str) -> Option<String> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r#"/s/[A-Za-z0-9_]+[^"']*?[?&]before=(\d+)"#).unwrap());
+    re.captures(html)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
 }
 
 fn cap(mut s: String) -> String {

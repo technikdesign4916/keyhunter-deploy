@@ -2059,7 +2059,28 @@ fn select_models(models: &[String], limit: usize) -> Vec<String> {
             continue;
         }
         let mut score = 0;
+        // DashScope ships placeholder rows first (`pre-mock_ptu_auth_v2_*`) and
+        // wraps partner catalogs (`vanchin/`, `antdigital/`). They are not chat
+        // models; probing them burned the whole model budget and stamped live
+        // workspace keys as INVALID.
+        if lm.contains("pre-mock")
+            || lm.contains("mock_ptu")
+            || lm.starts_with("pre-")
+            || lm.starts_with("vanchin/")
+            || lm.starts_with("antdigital/")
+        {
+            continue;
+        }
         for (needle, pts) in [
+            // Leaked workspace keys (`sk-ws-…`) usually serve a single cheap
+            // model while the flagship ids answer Arrearage/403. Probe these
+            // first so a live key is not reported dead on the expensive ids.
+            ("qwen3.8-27b", 220),
+            ("qwen3.8-max", 210),
+            ("deepseek-v4.1-flash-1017", 205),
+            ("glm-5.3", 200),
+            ("qwen-plus", 195),
+            ("qwen-max", 190),
             ("claude-opus", 100),
             ("claude-sonnet", 95),
             ("claude-haiku", 90),
