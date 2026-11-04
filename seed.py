@@ -16,6 +16,12 @@ import time
 # A handful of high-signal queries per repo host beats 20 generic sources.
 PROVIDER_DORKS = [
     # --- full-access DashScope: keys that serve qwen3.8-max / deepseek-v4-pro / glm-5.3 ---
+    ('"qwen3.8-max" filename:.env', 1124),
+    ('"qwen3.8-27b" "sk-"', 1123),
+    ('"deepseek-v4.1-flash-1017" "sk-"', 1122),
+    ('"DASHSCOPE_API_KEY" path:config', 1121),
+    ('"dashscope-intl" "DASHSCOPE_API_KEY"', 1120),
+    ('"dashscope" "Bearer sk-"', 1119),
     ('"qwen3.8-max" "sk-"', 1116),
     ('"qwen3.8-max" "DASHSCOPE_API_KEY"', 1115),
     ('"qwen3-max" "sk-" "dashscope"', 1114),
