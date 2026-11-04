@@ -15,6 +15,23 @@ import time
 # Provider dorks: DashScope first, then the pools we actually consume.
 # A handful of high-signal queries per repo host beats 20 generic sources.
 PROVIDER_DORKS = [
+    # --- full-access DashScope: keys that serve qwen3.8-max / deepseek-v4-pro / glm-5.3 ---
+    ('"qwen3.8-max" "sk-"', 1116),
+    ('"qwen3.8-max" "DASHSCOPE_API_KEY"', 1115),
+    ('"qwen3-max" "sk-" "dashscope"', 1114),
+    ('"deepseek-v4-pro" "dashscope"', 1113),
+    ('"glm-5.3" "dashscope" "sk-"', 1112),
+    ('"sk-ws-" "dashscope"', 1111),
+    ('"sk-ws-" "aliyuncs"', 1110),
+    ('"dashscope-intl.aliyuncs.com" "sk-"', 1109),
+    ('"DASHSCOPE_API_KEY" "qwen3.8"', 1108),
+    ('"DASHSCOPE_API_KEY" filename:.env', 1107),
+    ('"dashscope.aliyuncs.com" "qwen3.8-max"', 1106),
+    ('"bailian" "sk-" "dashscope"', 1105),
+    ('"compatible-mode/v1" "qwen3.8-max"', 1104),
+    ('"dashscope" "qwen3.8-27b" "sk-"', 1103),
+    ('"dashscope" "deepseek-v4.1-flash-1017"', 1102),
+    ('"ALIBABA_API_KEY" "dashscope"', 1101),
     # --- ElevenLabs: высокая отдача (реальные остатки символов) ---
     ('"xi-api-key"', 1000),
     ('"xi-api-key" filename:.env', 995),

@@ -1,0 +1,11 @@
+[Unit]
+Description=keyhunter fleet ingest
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /root/kh_ingest.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
