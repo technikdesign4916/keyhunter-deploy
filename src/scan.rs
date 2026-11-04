@@ -1528,6 +1528,19 @@ async fn probe_pairs(
     };
     let before_filter = pairs.len();
     pairs.retain(|p| !recently_checked.contains(&(p.endpoint.clone(), p.key.clone())));
+    // The same key arrives with several endpoint spellings (with/without /v1,
+    // native vs compatible-mode), and pair-level dedupe misses those. A key
+    // card pinned in a Telegram channel would otherwise be probed every cycle.
+    let key_hours = app.store.setting_i64("key_dedupe_hours", 12).max(1);
+    let before_keys = pairs.len();
+    pairs.retain(|p| !app.store.key_fresh(&p.key, key_hours));
+    if pairs.len() != before_keys {
+        tracing::info!(
+            "dedupe: {} pairs skipped (key probed within {}h)",
+            before_keys - pairs.len(),
+            key_hours
+        );
+    }
     sum.skipped += before_filter.saturating_sub(pairs.len());
     sum.pairs += pairs.len();
     if pairs.is_empty() {

@@ -2063,21 +2063,30 @@ impl Sources {
         }
         let per = limit.max(8);
         let mut docs = Vec::new();
-        for channel in channels.into_iter().take(per) {
+        for channel in channels.iter().take(per).cloned() {
             let mut before: Option<String> = None;
             let mut posts = 0usize;
-            for _ in 0..3 {
+            for _ in 0..6 {
                 let url = match &before {
                     Some(b) => format!("https://t.me/s/{}?before={}", channel, b),
                     None => format!("https://t.me/s/{}", channel),
                 };
-                let html = match self.text(&url).await {
+                let page = match self.text(&url).await {
                     Ok(h) => h,
                     Err(e) => {
                         debug!("tgweb {channel}: {e}");
                         break;
                     }
                 };
+                if before.is_none() {
+                    // Only the first page: reposted aggregator channels sit in
+                    // the newest posts, older pages repeat what we already know.
+                    let found = tg_remember_channels(&page, &channels);
+                    if found > 0 {
+                        debug!("tgweb {channel}: +{found} channels discovered");
+                    }
+                }
+                let html = page;
                 // Split the preview into individual posts: a key card is one
                 // post, and pairing a key with the endpoint from a different
                 // post invents pairs that never existed.
@@ -3438,6 +3447,56 @@ fn proxy_index_for_host(host: &str, len: usize) -> usize {
     (hasher.finish() % len as u64) as usize
 }
 
+/// Operator file with channels to scan (env TG_CHANNELS_FILE).
+fn tg_channels_path() -> String {
+    std::env::var("TG_CHANNELS_FILE").unwrap_or_else(|_| "data/tg_channels.txt".to_string())
+}
+
+/// Auto-discovered channels, appended by tg_remember_channels().
+fn tg_discover_path() -> String {
+    std::env::var("TG_DISCOVER_FILE").unwrap_or_else(|_| "data/tg_discovered.txt".to_string())
+}
+
+/// Remember channel handles mentioned inside scanned pages so the next cycle
+/// walks them too. Key-card channels repost each other constantly, so this
+/// grows the source pack without a rebuild or manual editing. Handles that turn
+/// out private simply return an empty preview and cost one cheap GET.
+fn tg_remember_channels(html: &str, known: &[String]) -> usize {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"t\.me/([A-Za-z0-9_]{4,64})").unwrap());
+    let path = tg_discover_path();
+    let mut stored: Vec<String> = std::fs::read_to_string(&path)
+        .map(|b| {
+            b.lines()
+                .map(|l| l.split('#').next().unwrap_or("").trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut added = 0usize;
+    for c in re.captures_iter(html) {
+        let name = match c.get(1) {
+            Some(m) => m.as_str(),
+            None => continue,
+        };
+        if matches!(name, "s" | "joinchat" | "addstickers" | "share" | "iv" | "proxy") {
+            continue;
+        }
+        if known.iter().any(|k| k == name) || stored.iter().any(|k| k == name) {
+            continue;
+        }
+        stored.push(name.to_string());
+        added += 1;
+        if added >= 30 {
+            break;
+        }
+    }
+    if added > 0 {
+        let _ = std::fs::write(&path, stored.join("\n") + "\n");
+    }
+    added
+}
+
 /// Channels that post live API-key cards in public previews. Kept small and
 /// verified: a channel that stops posting only costs one cheap GET per cycle.
 const TG_CHANNEL_PACK: &[&str] = &["mikakeyye"];
@@ -3455,14 +3514,14 @@ fn tg_channels(query: &str) -> Vec<String> {
     if !explicit.is_empty() && explicit != "*" {
         raw.push_str(explicit);
     } else {
-        let path =
-            std::env::var("TG_CHANNELS_FILE").unwrap_or_else(|_| "data/tg_channels.txt".to_string());
-        if let Ok(body) = std::fs::read_to_string(&path) {
-            for line in body.lines() {
-                let line = line.split('#').next().unwrap_or("").trim();
-                if !line.is_empty() {
-                    raw.push_str(line);
-                    raw.push(' ');
+        for path in [tg_channels_path(), tg_discover_path()] {
+            if let Ok(body) = std::fs::read_to_string(&path) {
+                for line in body.lines() {
+                    let line = line.split('#').next().unwrap_or("").trim();
+                    if !line.is_empty() {
+                        raw.push_str(line);
+                        raw.push(' ');
+                    }
                 }
             }
         }

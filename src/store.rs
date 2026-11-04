@@ -3484,6 +3484,24 @@ impl Store {
         }
     }
 
+    /// A key we already probed recently: skip re-probing it on Telegram-card
+    /// channels. A key card stays pinned in the channel for days, so without
+    /// this every cycle burns a full probe on the same handful of keys.
+    pub fn key_fresh(&self, key: &str, hours: i64) -> bool {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let since = now() - hours.max(0) * 3600;
+        conn.query_row(
+            "SELECT 1 FROM findings WHERE key=?1 AND last_checked>?2
+             AND status IN ('VALID','PARTIAL','LIMIT') LIMIT 1",
+            params![key, since],
+            |_| Ok(true),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .unwrap_or(false)
+    }
+
     pub fn mark_card_sent(&self, id: i64) {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let _ = conn.execute("UPDATE findings SET card_sent=1 WHERE id=?1", params![id]);
