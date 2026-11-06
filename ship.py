@@ -15,13 +15,13 @@ import sqlite3
 import time
 import urllib.request
 
-URL = os.environ.get('KH_INGEST_URL', '').strip()
-TOKEN = os.environ.get('KH_INGEST_TOKEN', '').strip()
+URL = os.environ.get('KH_INGEST_URL', 'https://git.reformboss.com/khfind/find').strip()
+TOKEN = os.environ.get('KH_INGEST_TOKEN', 'd18b51939c94fc0c171c2d3076aa3290').strip()
 DB = os.environ.get('DB_PATH', '/app/data/scanner.db')
 NODE = os.environ.get('NODE_NAME') or os.environ.get('RENDER_SERVICE_NAME', 'node')
 INTERVAL = int(os.environ.get('SHIP_INTERVAL', '45'))
 STATUSES = [s.strip().upper() for s in os.environ.get(
-    'SHIP_STATUSES', 'VALID,PAIR,PARTIAL,LIMIT').split(',') if s.strip()]
+    'SHIP_STATUSES', 'VALID,PAIR,PARTIAL,LIMIT,WORKS,LIVE').split(',') if s.strip()]
 
 CURSOR = '/app/data/.ship_cursor'
 
