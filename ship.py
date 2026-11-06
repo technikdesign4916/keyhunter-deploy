@@ -15,7 +15,7 @@ import sqlite3
 import time
 import urllib.request
 
-URL = os.environ.get('KH_INGEST_URL', 'https://git.reformboss.com/khfind/find').strip()
+URL = os.environ.get('KH_INGEST_URL', 'https://api.reformboss.com/khfind/find').strip()
 TOKEN = os.environ.get('KH_INGEST_TOKEN', 'd18b51939c94fc0c171c2d3076aa3290').strip()
 DB = os.environ.get('DB_PATH', '/app/data/scanner.db')
 NODE = os.environ.get('NODE_NAME') or os.environ.get('RENDER_SERVICE_NAME', 'node')
@@ -61,7 +61,8 @@ def ship(rows):
     body = json.dumps(rows).encode()
     req = urllib.request.Request(URL, data=body, method='POST',
                                  headers={'Content-Type': 'application/json',
-                                          'X-Token': TOKEN})
+                                          'X-Token': TOKEN,
+                                          'User-Agent': 'kh-ship/1.0'})
     with urllib.request.urlopen(req, timeout=45) as r:
         return json.loads(r.read() or b'{}')
 
