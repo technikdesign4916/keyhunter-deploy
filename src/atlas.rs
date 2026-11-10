@@ -62,7 +62,7 @@ pub fn pivot_host(app: &App, host: &str, priority: i64) -> usize {
         (format!("\"{host}\" in:file"), priority),
         (format!("\"{host}\" \"sk-\" in:file"), priority + 20),
         (format!("\"{host}\" \"api_key\" in:file"), priority + 15),
-        (format!("\"{host}\" extension:env"), priority + 10),
+        (format!("\"{host}\" path:.env"), priority + 10),
     ];
     for (q, p) in layer {
         if app.store.add_query_priority(&q, p).unwrap_or(false) {

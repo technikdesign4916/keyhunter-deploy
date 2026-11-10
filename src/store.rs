@@ -141,6 +141,15 @@ CREATE TABLE IF NOT EXISTS source_tasks (
 CREATE INDEX IF NOT EXISTS idx_source_tasks_pick
     ON source_tasks(enabled, priority DESC, runs ASC, last_run ASC);
 
+CREATE TABLE IF NOT EXISTS gh_accounts (
+    email TEXT PRIMARY KEY,
+    password TEXT NOT NULL DEFAULT '',
+    totp TEXT NOT NULL DEFAULT '',
+    recovery TEXT NOT NULL DEFAULT '',
+    login TEXT NOT NULL DEFAULT '',
+    raw TEXT NOT NULL DEFAULT '',
+    added_at INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS source_frontier (
     url TEXT PRIMARY KEY,
     source TEXT NOT NULL DEFAULT '',
@@ -2275,6 +2284,43 @@ impl Store {
             r.get(0)
         })?;
         Ok(id)
+    }
+
+    /// Сохраняет combo-строку `email:pass:totp:recovery:user:token` как аккаунт.
+    pub fn add_gh_account(&self, raw: &str) -> Result<bool> {
+        let line = raw.trim();
+        let mut parts: Vec<&str> = line.split(':').collect();
+        if parts.len() < 5 {
+            return Ok(false);
+        }
+        let has_token = parts.last().map(|t| {
+            t.starts_with("ghp_") || t.starts_with("gho_") || t.starts_with("ghs_")
+                || t.starts_with("github_pat_")
+        }).unwrap_or(false);
+        if has_token {
+            parts.pop();
+        }
+        if parts.len() < 5 {
+            return Ok(false);
+        }
+        let email = parts[0].trim().to_string();
+        if !email.contains('@') {
+            return Ok(false);
+        }
+        let login = parts[parts.len() - 1].trim().to_string();
+        let recovery = parts[parts.len() - 2].trim().to_string();
+        let totp = parts[parts.len() - 3].trim().to_string();
+        let password = parts[1..parts.len() - 3].join(":");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "INSERT INTO gh_accounts(email,password,totp,recovery,login,raw,added_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(email) DO UPDATE SET password=excluded.password, totp=excluded.totp,
+                 recovery=excluded.recovery, login=excluded.login, raw=excluded.raw,
+                 added_at=excluded.added_at",
+            params![email, password, totp, recovery, login, line, now()],
+        )?;
+        Ok(true)
     }
 
     pub fn list_pats(&self) -> Vec<PatRow> {

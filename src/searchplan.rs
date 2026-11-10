@@ -102,7 +102,7 @@ pub const PROVIDERS: &[Provider] = &[
             "TONGYI_QIANWEN_API_KEY",
             "TONGYI_QIANWEN_TOKEN",
         ],
-        prefixes: &["sk-"],
+        prefixes: &["sk-ws-", "sk-sp-", "sk-"],
         contexts: &["dashscope", "百炼", "通义", "qwen"],
     },
     Provider {
@@ -112,6 +112,14 @@ pub const PROVIDERS: &[Provider] = &[
         env_vars: &["MOONSHOT_API_KEY", "KIMI_API_KEY"],
         prefixes: &["sk-"],
         contexts: &["moonshot", "kimi"],
+    },
+    Provider {
+        name: "radeon",
+        aliases: &["radeon", "amd cloud", "token factory"],
+        hosts: &["developer.amd.com.cn"],
+        env_vars: &["RADEON_API_KEY", "AMD_API_KEY", "AMD_CLOUD_KEY"],
+        prefixes: &["rc-"],
+        contexts: &["radeon", "amd"],
     },
     Provider {
         name: "xai",

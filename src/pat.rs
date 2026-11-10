@@ -5,9 +5,11 @@
 //! the matching source adapters (where the public API accepts a PAT).
 
 use crate::github::{truncate, PatCheck};
+use regex::Regex;
 use reqwest::header::HeaderMap;
 use reqwest::{Client, StatusCode};
 use serde_json::Value;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 pub const PROVIDERS: &[&str] = &["github", "gitee", "gitlab", "gitea", "codeberg"];
@@ -61,6 +63,34 @@ pub fn label(provider: &str) -> &'static str {
 pub struct ParsedPats {
     pub entries: Vec<(String, String)>,
     pub skipped: Vec<String>,
+    /// Сырые combo-строки вида `email:pass:totp:recovery:user:token`,
+    /// из которых были вынуты PAT (для учёта аккаунтов отдельно от токенов).
+    pub combos: Vec<String>,
+}
+
+/// Токен-паттерны провайдеров. Ищем внутри строки, потому что combo-дампы
+/// кладут PAT последним полем после почты, пароля, TOTP и recovery-кодов.
+fn token_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?:github_pat_[A-Za-z0-9_]{40,200}|gh[pousr]_[A-Za-z0-9]{36}|glpat-[A-Za-z0-9_\-]{20,}|gitee_[A-Za-z0-9]{20,}|gitea_[A-Za-z0-9]{20,}|codeberg_[A-Za-z0-9]{20,})",
+        )
+        .expect("PAT regex")
+    })
+}
+
+/// Первый валидный по префиксу токен внутри строки.
+pub fn extract_token(s: &str) -> Option<String> {
+    token_re()
+        .find(s)
+        .map(|m| m.as_str().to_string())
+        .filter(|t| t.len() >= 20 && !t.contains(char::is_whitespace))
+}
+
+/// Признак combo-строки: минимум 3 поля по `:` и похоже на почту в нулевом.
+fn looks_like_combo(s: &str) -> bool {
+    s.matches(':').count() >= 2 && s.split(':').next().map(|f| f.contains('@')).unwrap_or(false)
 }
 
 /// Accepts `provider:token`, a bare `provider` word that sets the default for
@@ -100,13 +130,30 @@ pub fn parse_input(raw: &str) -> ParsedPats {
             out.skipped.push(t.to_string());
             continue;
         }
-        let provider = if provider.is_empty() {
+        let mut provider = if provider.is_empty() {
             provider_for_token(&token)
                 .map(str::to_string)
                 .unwrap_or_default()
         } else {
             provider
         };
+        // combo-дамп: `email:pass:totp:recovery:user:ghp_...` — токен внутри строки.
+        let mut token = token;
+        if provider.is_empty() {
+            if let Some(found) = extract_token(&token) {
+                // combo-маркер: в куске есть почта (после split по ',' кусок может
+                // начинаться с остатка recovery-кодов, а не с email).
+                if (looks_like_combo(&token) || token.contains('@'))
+                    && !out.combos.iter().any(|c| c == &token)
+                {
+                    out.combos.push(token.clone());
+                }
+                provider = provider_for_token(&found)
+                    .map(str::to_string)
+                    .unwrap_or_default();
+                token = found;
+            }
+        }
         if provider.is_empty() {
             out.skipped.push(t.to_string());
             continue;
@@ -117,6 +164,16 @@ pub fn parse_input(raw: &str) -> ParsedPats {
             .any(|(p, x)| p == &provider && x == &token)
         {
             out.entries.push((provider, token));
+        }
+    }
+    // Полные combo-строки сохраняем целиком (split по ',' рвёт их на куски):
+    // `email:pass:totp:rec1,rec2,rec3:user:token`.
+    if !out.entries.is_empty() {
+        for line in raw.lines() {
+            let l = line.trim();
+            if l.contains('@') && extract_token(l).is_some() && !out.combos.iter().any(|c| c == l) {
+                out.combos.push(l.to_string());
+            }
         }
     }
     out
@@ -267,4 +324,46 @@ mod tests {
             Some("gitlab")
         );
     }
+}
+
+#[cfg(test)]
+mod combo_tests {
+    use super::*;
+
+    const COMBO: &str = "pulteturboparry@gmail.com:7k1$76x54!%J:DZQV2UTZ66LFNYMH:e746d-e4537,18772-96a3b,d6c8f-4a397:Sealaiincrease:ghp_kN3hR8tQvW1xYzAbCdEfGhIjKlMnOpQrStUvX";
+
+    #[test]
+    fn combo_dump_yields_token() {
+        let p = parse_input(COMBO);
+        assert_eq!(p.entries.len(), 1, "ожидался ровно один токен, got {:?}", p.entries);
+        let (provider, token) = &p.entries[0];
+        assert_eq!(provider, "github");
+        assert!(token.starts_with("ghp_"), "token={token}");
+        assert_eq!(token.len(), 40);
+        assert_eq!(p.combos.len(), 1, "combo должна быть записана");
+        assert!(p.combos[0].starts_with("pulteturboparry@gmail.com:"));
+    }
+
+    #[test]
+    fn multiline_combo_batch() {
+        let raw = format!("{COMBO}\n{}", COMBO.replace("pulteturboparry", "second").replace("ghp_kN3h", "ghp_Zz9q"));
+        let p = parse_input(&raw);
+        assert_eq!(p.entries.len(), 2, "два разных токена: {:?}", p.entries.len());
+        assert_eq!(p.combos.len(), 2);
+    }
+
+    #[test]
+    fn plain_token_still_works() {
+        let p = parse_input("ghp_kN3hR8tQvW1xYzAbCdEfGhIjKlMnOpQrStUvX");
+        assert_eq!(p.entries.len(), 1);
+        assert_eq!(p.entries[0].0, "github");
+    }
+
+    #[test]
+    fn provider_prefix_still_works() {
+        let p = parse_input("gitlab:glpat-abcdefghijklmnopqrst");
+        assert_eq!(p.entries.len(), 1);
+        assert_eq!(p.entries[0].0, "gitlab");
+    }
+
 }

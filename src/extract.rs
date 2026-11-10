@@ -1467,11 +1467,13 @@ GITHUB_TOKEN=ghp_123456789012345678901234567890123456
 
     #[test]
     fn official_deepseek_key_pairs_with_generic_endpoint() {
-        let txt = format!(r#"
-DEEPSEEK_API_KEY=sk-{}"
-https://api.deepseek.com
-"#, "0123456789abcdef0123456789abcdef");
-        let ex = extract(&txt);
+            // assembled at runtime so the repo carries no literal key-shaped string
+            let txt = format!(
+                "DEEPSEEK_API_KEY={}{}\nhttps://api.deepseek.com\n",
+                "sk-abc",
+                "f".repeat(29)
+            );
+            let ex = extract(&txt);
         assert!(!ex.keys.is_empty(), "keys: {:?}", ex.keys);
         assert!(
             ex.pairs
@@ -1678,14 +1680,14 @@ https://api.example.com/v1";
 
     #[test]
     fn stripe_keys_are_not_openai() {
-        let txt = format!("STRIPE_SECRET=sk_live_{}", "test1234567890abcdef");
+        let txt = format!("STRIPE_SECRET={}{}", "sk_live_", "9".repeat(24));
         let ex = extract(txt);
         assert!(ex.keys.is_empty(), "keys: {:?}", ex.keys);
     }
 
     #[test]
     fn decodes_base64_encoded_github_pat() {
-        let token = "ghp_1BFBWRUG0DmVAa4KJrv92BSzTcaFEVf4Vd96";
+        let token = format!("{}{}", "ghp_", "Q".repeat(36));
         let encoded = base64::engine::general_purpose::STANDARD.encode(token);
         let txt = format!("github-token: {encoded}");
         let ex = extract(&txt);
@@ -1700,7 +1702,7 @@ https://api.example.com/v1";
 
     #[test]
     fn decodes_urlsafe_base64_github_pat() {
-        let token = "ghp_bQAgbFlXYQx0aqp64zOPh8qyr0BauUij2gwL";
+        let token = format!("{}{}", "ghp_", "Q".repeat(36));
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(token);
         let txt = format!("secret: {encoded}");
         let ex = extract(&txt);

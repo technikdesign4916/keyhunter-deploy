@@ -337,7 +337,7 @@ async fn run_source(app: &Arc<App>, job: &Job) -> Result<Summary> {
         if crate::sources::is_search_shell(doc) {
             continue;
         }
-        let ex = extract::extract_hinted(&doc.text);
+        let ex = extract::extract(&doc.text);
         let endpoints = ex.strong_endpoints();
         for ep in &endpoints {
             let host = extract::host_of(ep);
@@ -506,7 +506,7 @@ async fn run_discover(app: &Arc<App>, job: &Job) -> Result<Summary> {
     }
     let found = repos.len();
     repos.sort_by(|a, b| b.1.cmp(&a.1));
-    let cap = app.store.setting_i64("deep_concurrency", 4).clamp(1, 24) as usize;
+    let cap = app.store.setting_i64("deep_concurrency", 4).clamp(1, 12) as usize;
     let active = app.store.running_job_count("repo").max(0) as usize;
     let limit = (app.store.setting_i64("discover_repos", 2).clamp(0, 20) as usize)
         .min(cap.saturating_sub(active));
@@ -991,7 +991,7 @@ async fn process_files(
                 .await
             }
         });
-        let file_conc = app.store.setting_i64("file_concurrency", 64).clamp(1, 256) as usize;
+        let file_conc = app.store.setting_i64("file_concurrency", 64).clamp(1, 128) as usize;
         let chunk_res: Vec<FileResult> = stream::iter(futs)
             .buffer_unordered(file_conc)
             .collect()
@@ -1106,7 +1106,7 @@ async fn process_file(
         return out;
     };
 
-    let ex = extract::extract_hinted(&text);
+    let ex = extract::extract(&text);
     out.endpoints = ex.strong_endpoints();
     let direct_pairs = ex.pairs.len();
     for p in ex.pairs {
@@ -1399,7 +1399,7 @@ async fn enqueue_deep(app: &Arc<App>, job: &Job, results: &[FileResult]) {
     if core < 50 {
         return;
     }
-    let cap = app.store.setting_i64("deep_concurrency", 4).clamp(1, 24);
+    let cap = app.store.setting_i64("deep_concurrency", 4).clamp(1, 12);
     let active = app.store.running_job_count("repo");
     let limit = limit.min((core / 50).max(0)).min((cap - active).max(0));
     if limit == 0 {
@@ -1528,19 +1528,6 @@ async fn probe_pairs(
     };
     let before_filter = pairs.len();
     pairs.retain(|p| !recently_checked.contains(&(p.endpoint.clone(), p.key.clone())));
-    // The same key arrives with several endpoint spellings (with/without /v1,
-    // native vs compatible-mode), and pair-level dedupe misses those. A key
-    // card pinned in a Telegram channel would otherwise be probed every cycle.
-    let key_hours = app.store.setting_i64("key_dedupe_hours", 12).max(1);
-    let before_keys = pairs.len();
-    pairs.retain(|p| !app.store.key_fresh(&p.key, key_hours));
-    if pairs.len() != before_keys {
-        tracing::info!(
-            "dedupe: {} pairs skipped (key probed within {}h)",
-            before_keys - pairs.len(),
-            key_hours
-        );
-    }
     sum.skipped += before_filter.saturating_sub(pairs.len());
     sum.pairs += pairs.len();
     if pairs.is_empty() {
@@ -2225,6 +2212,7 @@ mod tests {
             rank_enabled: false,
             rank_base_url: String::new(),
             rank_model: String::new(),
+            headless: false,
         };
         let pool = Arc::new(PatPool::new(store.clone()));
         store

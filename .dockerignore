@@ -1,8 +1,7 @@
-.git
-target
-data
-exports
-.env
-*.bak-*
 *.log
-kh_rs.tar.gz
+*.tgz
+.local
+.render
+__pycache__
+build2.log
+kh_prof

